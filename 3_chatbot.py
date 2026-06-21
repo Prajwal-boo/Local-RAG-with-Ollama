@@ -5,36 +5,32 @@ from dotenv import load_dotenv
 # import streamlit
 import streamlit as st
 
-# import langchain
-from langchain.agents import AgentExecutor
+# import langchain / langgraph
+from langgraph.prebuilt import create_react_agent
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain.agents import create_tool_calling_agent
-from langchain import hub
-from langchain_core.prompts import PromptTemplate
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 # load environment variables
-load_dotenv()  
+load_dotenv()
 
-###############################   INITIALIZE EMBEDDINGS MODEL  #################################################################################################
+##########################  INITIALIZE EMBEDDINGS MODEL  ######################################
 
 embeddings = OllamaEmbeddings(
     model=os.getenv("EMBEDDING_MODEL"),
 )
 
-###############################   INITIALIZE CHROMA VECTOR STORE   #############################################################################################
+##########################  INITIALIZE CHROMA VECTOR STORE  ###################################
 
 vector_store = Chroma(
     collection_name=os.getenv("COLLECTION_NAME"),
     embedding_function=embeddings,
-    persist_directory=os.getenv("DATABASE_LOCATION"), 
+    persist_directory=os.getenv("DATABASE_LOCATION"),
 )
 
-
-###############################   INITIALIZE CHAT MODEL   #######################################################################################################
+##########################  INITIALIZE CHAT MODEL  ############################################
 
 llm = init_chat_model(
     os.getenv("CHAT_MODEL"),
@@ -42,68 +38,57 @@ llm = init_chat_model(
     temperature=0
 )
 
-       
+##########################  SYSTEM PROMPT  ####################################################
 
+SYSTEM_PROMPT = """You are a helpful assistant.
 
-# pulling prompt from hub
-prompt = PromptTemplate.from_template("""                                
-You are a helpful assistant. You will be provided with a query and a chat history.
-Your task is to retrieve relevant information from the vector store and provide a response.
-For this you use the tool 'retrieve' to get the relevant information.
-                                      
-The query is as follows:                    
-{input}
+You have access to a 'retrieve' tool that searches a knowledge base.
 
-The chat history is as follows:
-{chat_history}
+ONLY use the 'retrieve' tool when the user asks a specific question that requires factual information from the knowledge base.
 
-Please provide a concise and informative response based on the retrieved information.
-If you don't know the answer, say "I don't know" (and don't provide a source).
-                                      
-You can use the scratchpad to store any intermediate results or notes.
-The scratchpad is as follows:
-{agent_scratchpad}
+Do NOT use the 'retrieve' tool for:
+- Greetings (hi, hello, how are you)
+- Simple conversational messages
+- Questions you can answer from general knowledge
 
-For every piece of information you provide, also provide the source.
+For every piece of information retrieved, provide the source URL.
+If you don't know the answer after retrieving, say "I don't know" and don't provide a source.
 
-Return text as follows:
-
+Return your response as:
 <Answer to the question>
-Source: source_url
-""")
+Source: source_url (only if retrieve tool was used)
+"""
 
+##########################  RETRIEVER TOOL  ###################################################
 
-# creating the retriever tool
 @tool
 def retrieve(query: str):
     """Retrieve information related to a query."""
     retrieved_docs = vector_store.similarity_search(query, k=2)
 
     serialized = ""
-
     for doc in retrieved_docs:
+        print(f"DEBUG - Retrieved: {doc.metadata['source']} | {doc.page_content[:100]}")
         serialized += f"Source: {doc.metadata['source']}\nContent: {doc.page_content}\n\n"
 
     return serialized
 
-# combining all tools
 tools = [retrieve]
 
-# initiating the agent
-agent = create_tool_calling_agent(llm, tools, prompt)
+##########################  INITIALIZE AGENT  #################################################
 
-# create the agent executor
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+agent_executor = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
-# initiating streamlit app
+##########################  STREAMLIT APP  ####################################################
+
 st.set_page_config(page_title="Agentic RAG Chatbot", page_icon="🦜")
 st.title("🦜 Agentic RAG Chatbot")
 
-# initialize chat history
+# initialize chat history with system prompt only once
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = [SystemMessage(SYSTEM_PROMPT)]  # 👈 added only once
 
-# display chat messages from history on app rerun
+# display chat history (skip SystemMessage)
 for message in st.session_state.messages:
     if isinstance(message, HumanMessage):
         with st.chat_message("user"):
@@ -112,29 +97,20 @@ for message in st.session_state.messages:
         with st.chat_message("assistant"):
             st.markdown(message.content)
 
+# chat input
+user_question = st.chat_input("Ask me anything...")
 
-# create the bar where we can type messages
-user_question = st.chat_input("How are you?")
-
-
-# did the user submit a prompt?
 if user_question:
-
-    # add the message from the user (prompt) to the screen with streamlit
+    # show user message
     with st.chat_message("user"):
         st.markdown(user_question)
+    st.session_state.messages.append(HumanMessage(user_question))
 
-        st.session_state.messages.append(HumanMessage(user_question))
+    # invoke agent (system prompt already inside messages)
+    result = agent_executor.invoke({"messages": st.session_state.messages})  # 👈 no duplicate system prompt
+    ai_message = result["messages"][-1].content
 
-
-    # invoking the agent
-    result = agent_executor.invoke({"input": user_question, "chat_history":st.session_state.messages})
-
-    ai_message = result["output"]
-
-    # adding the response from the llm to the screen (and chat)
+    # show assistant response
     with st.chat_message("assistant"):
         st.markdown(ai_message)
-
-        st.session_state.messages.append(AIMessage(ai_message))
-
+    st.session_state.messages.append(AIMessage(ai_message))

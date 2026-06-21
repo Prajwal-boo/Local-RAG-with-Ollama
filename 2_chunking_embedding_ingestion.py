@@ -83,5 +83,4 @@ for line in file_content:
     vector_store.add_documents(documents=texts, ids=uuids)
 
 
-    if len(line) < 10:
-        break
+    
